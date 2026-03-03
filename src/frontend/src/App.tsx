@@ -198,9 +198,9 @@ export default function App() {
         errors.credit = "Required";
         valid = false;
       } else {
-        const c = Number.parseInt(s.credit, 10);
-        if (Number.isNaN(c) || c <= 0 || !Number.isInteger(c)) {
-          errors.credit = "Must be > 0";
+        const c = Number.parseFloat(s.credit);
+        if (Number.isNaN(c) || c < 0) {
+          errors.credit = "Must be ≥ 0";
           valid = false;
         }
       }
@@ -228,9 +228,15 @@ export default function App() {
       }
       return {
         grade: gradePoint,
-        credits: BigInt(Number.parseInt(s.credit, 10)),
+        credits: Number.parseFloat(s.credit),
       };
     });
+
+    const totalCredits = grades.reduce((sum, g) => sum + g.credits, 0);
+    if (totalCredits === 0) {
+      toast.error("At least one subject must have credits greater than 0.");
+      return;
+    }
 
     calculateMutation.mutate(grades);
   }
@@ -780,9 +786,9 @@ function SubjectRowItem({
           <Input
             data-ocid={`subject.credit_input.${rowNum}`}
             type="number"
-            inputMode="numeric"
-            min={1}
-            step={1}
+            inputMode="decimal"
+            min={0}
+            step={0.5}
             placeholder="Cr."
             value={subject.credit}
             onChange={(e) =>

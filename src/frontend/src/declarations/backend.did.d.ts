@@ -10,7 +10,7 @@ import type { ActorMethod } from '@icp-sdk/core/agent';
 import type { IDL } from '@icp-sdk/core/candid';
 import type { Principal } from '@icp-sdk/core/principal';
 
-export interface Grade { 'credits' : bigint, 'grade' : number }
+export interface Grade { 'credits' : number, 'grade' : number }
 export interface _SERVICE {
   'calculate' : ActorMethod<[Array<Grade>], number>,
   'gradeToPoint' : ActorMethod<[string], number>,

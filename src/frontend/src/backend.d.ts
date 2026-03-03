@@ -8,7 +8,7 @@ export interface None {
 }
 export type Option<T> = Some<T> | None;
 export interface Grade {
-    credits: bigint;
+    credits: number;
     grade: number;
 }
 export interface backendInterface {

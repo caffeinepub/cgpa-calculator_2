@@ -8,7 +8,10 @@
 
 import { IDL } from '@icp-sdk/core/candid';
 
-export const Grade = IDL.Record({ 'credits' : IDL.Nat, 'grade' : IDL.Float64 });
+export const Grade = IDL.Record({
+  'credits' : IDL.Float64,
+  'grade' : IDL.Float64,
+});
 
 export const idlService = IDL.Service({
   'calculate' : IDL.Func([IDL.Vec(Grade)], [IDL.Float64], []),
@@ -18,7 +21,7 @@ export const idlService = IDL.Service({
 export const idlInitArgs = [];
 
 export const idlFactory = ({ IDL }) => {
-  const Grade = IDL.Record({ 'credits' : IDL.Nat, 'grade' : IDL.Float64 });
+  const Grade = IDL.Record({ 'credits' : IDL.Float64, 'grade' : IDL.Float64 });
   
   return IDL.Service({
     'calculate' : IDL.Func([IDL.Vec(Grade)], [IDL.Float64], []),

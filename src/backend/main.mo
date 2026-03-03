@@ -8,18 +8,18 @@ import Int "mo:core/Int";
 actor {
   type Grade = {
     grade : Float;
-    credits : Nat;
+    credits : Float;
   };
 
   public shared ({ caller }) func calculate(grades : [Grade]) : async Float {
     if (grades.size() == 0) { Runtime.trap("Input array must not be empty") };
 
-    var totalCredits = 0;
-    let totalGradePoints = grades.values().foldLeft(0.0, func(acc, grade) { totalCredits += grade.credits; acc + (grade.grade * grade.credits.toFloat()) });
+    var totalCredits = 0.0;
+    let totalGradePoints = grades.values().foldLeft(0.0, func(acc, grade) { totalCredits += grade.credits; acc + (grade.grade * grade.credits) });
 
-    if (totalCredits == 0) { Runtime.trap("Total credits must be greater than 0.") };
+    if (totalCredits == 0.0) { Runtime.trap("Total credits must be greater than 0.") };
 
-    (totalGradePoints * 100).toInt().toFloat() / totalCredits.toFloat() / 100;
+    (totalGradePoints * 100).toInt().toFloat() / totalCredits / 100;
   };
 
   public shared ({ caller }) func gradeToPoint(letterGrade : Text) : async Float {

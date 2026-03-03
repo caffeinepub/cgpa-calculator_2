@@ -90,7 +90,7 @@ export class ExternalBlob {
     }
 }
 export interface Grade {
-    credits: bigint;
+    credits: number;
     grade: number;
 }
 export interface backendInterface {

@@ -5,8 +5,10 @@ import { Toaster } from "@/components/ui/sonner";
 import { useActor } from "@/hooks/useActor";
 import { useMutation } from "@tanstack/react-query";
 import {
+  Brain,
   Calculator,
   ChevronDown,
+  CloudUpload,
   GraduationCap,
   Hash,
   Loader2,
@@ -14,14 +16,16 @@ import {
   Sparkles,
   Star,
   Trash2,
+  X,
 } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
-import { useCallback, useId, useState } from "react";
+import { useCallback, useId, useRef, useState } from "react";
 import { toast } from "sonner";
 import type { Grade } from "./backend.d.ts";
 
 /* ── Types ─────────────────────────────────────────────────────── */
 type GradeMode = "number" | "letter";
+type AppTab = "manual" | "upload";
 
 const LETTER_GRADES = ["O", "A+", "A", "B+", "B", "C"] as const;
 type LetterGrade = (typeof LETTER_GRADES)[number];
@@ -42,6 +46,12 @@ interface SubjectRow {
   numberGrade: string;
   credit: string;
   errors: { grade?: string; credit?: string };
+}
+
+interface ExtractedSubject {
+  subject: string;
+  grade: number;
+  credits: number;
 }
 
 function makeRow(id: string): SubjectRow {
@@ -94,10 +104,13 @@ function newId() {
   return `row-${++rowCounter}`;
 }
 
+const GEMINI_API_KEY = import.meta.env.VITE_GEMINI_API_KEY ?? "";
+
 export default function App() {
   const { actor, isFetching: actorFetching } = useActor();
   const _formId = useId();
 
+  const [activeTab, setActiveTab] = useState<AppTab>("manual");
   const [subjects, setSubjects] = useState<SubjectRow[]>(() => [
     makeRow(newId()),
     makeRow(newId()),
@@ -105,6 +118,18 @@ export default function App() {
   ]);
   const [result, setResult] = useState<number | null>(null);
   const [calcError, setCalcError] = useState<string | null>(null);
+
+  // Upload tab state
+  const [uploadedImage, setUploadedImage] = useState<File | null>(null);
+  const [imagePreviewUrl, setImagePreviewUrl] = useState<string | null>(null);
+  const [isDragging, setIsDragging] = useState(false);
+  const [isAnalysing, setIsAnalysing] = useState(false);
+  const [analyseError, setAnalyseError] = useState<string | null>(null);
+  const [extractedSubjects, setExtractedSubjects] = useState<
+    ExtractedSubject[] | null
+  >(null);
+
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   /* ── Mutations ─────────────────────────────────────────────────── */
   const calculateMutation = useMutation({
@@ -174,7 +199,6 @@ export default function App() {
     const updated = subjects.map((s) => {
       const errors: SubjectRow["errors"] = {};
 
-      // Grade validation
       if (s.mode === "number") {
         if (s.numberGrade === "") {
           errors.grade = "Required";
@@ -193,7 +217,6 @@ export default function App() {
         }
       }
 
-      // Credit validation
       if (s.credit === "") {
         errors.credit = "Required";
         valid = false;
@@ -212,7 +235,7 @@ export default function App() {
     return valid;
   }
 
-  /* ── Calculate ──────────────────────────────────────────────────── */
+  /* ── Calculate (Manual) ──────────────────────────────────────────── */
   async function handleCalculate() {
     if (!validateAll()) {
       toast.error("Please fix all errors before calculating.");
@@ -239,6 +262,200 @@ export default function App() {
     }
 
     calculateMutation.mutate(grades);
+  }
+
+  /* ── Image upload helpers ────────────────────────────────────────── */
+  function handleFileSelect(file: File) {
+    const validTypes = [
+      "image/jpeg",
+      "image/png",
+      "image/webp",
+      "application/pdf",
+    ];
+    if (!validTypes.includes(file.type)) {
+      toast.error("Please upload a JPG, PNG, WEBP, or PDF file.");
+      return;
+    }
+    if (file.size > 10 * 1024 * 1024) {
+      toast.error("File size must be less than 10 MB.");
+      return;
+    }
+
+    // Revoke old URL
+    if (imagePreviewUrl) URL.revokeObjectURL(imagePreviewUrl);
+
+    setUploadedImage(file);
+    setImagePreviewUrl(URL.createObjectURL(file));
+    setExtractedSubjects(null);
+    setAnalyseError(null);
+    setResult(null);
+  }
+
+  function handleDropzoneDrop(e: React.DragEvent) {
+    e.preventDefault();
+    setIsDragging(false);
+    const file = e.dataTransfer.files[0];
+    if (file) handleFileSelect(file);
+  }
+
+  function handleFileInputChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (file) handleFileSelect(file);
+    // Reset so same file can be re-uploaded
+    e.target.value = "";
+  }
+
+  function clearUpload() {
+    if (imagePreviewUrl) URL.revokeObjectURL(imagePreviewUrl);
+    setUploadedImage(null);
+    setImagePreviewUrl(null);
+    setExtractedSubjects(null);
+    setAnalyseError(null);
+    setResult(null);
+  }
+
+  function fileToBase64(file: File): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const result = reader.result as string;
+        // Remove data URL prefix: "data:image/jpeg;base64,"
+        const base64 = result.split(",")[1];
+        resolve(base64);
+      };
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+  }
+
+  /* ── Analyse & Calculate ─────────────────────────────────────────── */
+  async function handleAnalyse() {
+    if (!uploadedImage) {
+      toast.error("Please upload a result image first.");
+      return;
+    }
+
+    if (!GEMINI_API_KEY) {
+      setAnalyseError(
+        "AI analysis not configured — please use Manual Entry mode.",
+      );
+      return;
+    }
+
+    if (!actor) {
+      toast.error("Backend not ready. Please try again.");
+      return;
+    }
+
+    setIsAnalysing(true);
+    setAnalyseError(null);
+    setExtractedSubjects(null);
+    setResult(null);
+
+    try {
+      const base64 = await fileToBase64(uploadedImage);
+      const mimeType =
+        uploadedImage.type === "application/pdf"
+          ? "application/pdf"
+          : (uploadedImage.type as "image/jpeg" | "image/png" | "image/webp");
+
+      const prompt = `You are an academic result parser. Analyse this student result/marksheet image carefully. Extract ALL subjects with their grade points and credit hours. Return ONLY a valid JSON array with no markdown, no code block, no explanation. Each object must have exactly these fields: {"subject": string, "grade": number (0-10 numeric grade point; convert letter grades O=10, A+=9, A=8, B+=7, B=6, C=5, F=0), "credits": number}. If credits are not visible, use 3 as default.`;
+
+      const response = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            contents: [
+              {
+                parts: [
+                  { text: prompt },
+                  { inline_data: { mime_type: mimeType, data: base64 } },
+                ],
+              },
+            ],
+            generationConfig: { temperature: 0.1, maxOutputTokens: 2048 },
+          }),
+        },
+      );
+
+      if (!response.ok) {
+        const errData = await response.json().catch(() => ({}));
+        throw new Error(
+          (errData as { error?: { message?: string } })?.error?.message ||
+            "Gemini API request failed.",
+        );
+      }
+
+      const data = await response.json();
+      const rawText: string =
+        data?.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
+
+      // Strip markdown fences if any
+      const cleaned = rawText
+        .replace(/^```(?:json)?\s*/i, "")
+        .replace(/\s*```\s*$/, "")
+        .trim();
+
+      let parsed: ExtractedSubject[];
+      try {
+        parsed = JSON.parse(cleaned);
+        if (!Array.isArray(parsed) || parsed.length === 0) {
+          throw new Error("No subjects found.");
+        }
+      } catch {
+        throw new Error(
+          "Could not read the result. Please try a clearer photo.",
+        );
+      }
+
+      // Validate and clamp values
+      const sanitised: ExtractedSubject[] = parsed.map((item) => ({
+        subject: String(item.subject ?? "Subject"),
+        grade: Math.min(10, Math.max(0, Number(item.grade) || 0)),
+        credits: Math.max(0, Number(item.credits) || 3),
+      }));
+
+      setExtractedSubjects(sanitised);
+
+      // Populate manual tab rows
+      const newRows: SubjectRow[] = sanitised.map((item) => ({
+        id: newId(),
+        mode: "number" as GradeMode,
+        letterGrade: "" as const,
+        numberGrade: String(item.grade),
+        credit: String(item.credits),
+        errors: {},
+      }));
+      setSubjects(newRows);
+
+      // Calculate CGPA via backend
+      const grades: Grade[] = sanitised.map((item) => ({
+        grade: item.grade,
+        credits: item.credits,
+      }));
+      const totalCredits = grades.reduce((sum, g) => sum + g.credits, 0);
+      if (totalCredits === 0) {
+        toast.error(
+          "All detected subjects have 0 credits. Please check the image.",
+        );
+        return;
+      }
+
+      const cgpa = await actor.calculate(grades);
+      setResult(cgpa);
+      toast.success("CGPA calculated from your result image!");
+    } catch (err) {
+      const msg =
+        err instanceof Error
+          ? err.message
+          : "Could not read the result. Please try a clearer photo.";
+      setAnalyseError(msg);
+      toast.error(msg);
+    } finally {
+      setIsAnalysing(false);
+    }
   }
 
   const isLoading = calculateMutation.isPending || actorFetching;
@@ -305,7 +522,8 @@ export default function App() {
             </h1>
           </div>
           <p className="text-muted-foreground text-sm md:text-base max-w-md mx-auto leading-relaxed">
-            Enter your subjects, grades, and credits — get your CGPA instantly.
+            Upload your result image or enter grades manually — get your CGPA
+            instantly.
           </p>
         </motion.div>
       </header>
@@ -322,211 +540,665 @@ export default function App() {
             ease: [0.25, 0.46, 0.45, 0.94],
           }}
         >
-          {/* Main glass card */}
-          <div className="glass-card rounded-2xl p-6 md:p-8">
-            {/* Table header */}
-            <div className="grid grid-cols-[1fr_auto_auto_auto] gap-3 items-center mb-3 px-1">
-              <div className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">
-                Subject
-              </div>
-              <div className="text-xs font-semibold uppercase tracking-widest text-muted-foreground text-center w-20">
-                Grade
-              </div>
-              <div className="text-xs font-semibold uppercase tracking-widest text-muted-foreground text-center w-20">
-                Credits
-              </div>
-              <div className="w-8" />
-            </div>
-
-            {/* Subject rows */}
-            <div className="space-y-3">
-              <AnimatePresence initial={false}>
-                {subjects.map((subject, idx) => (
-                  <SubjectRowItem
-                    key={subject.id}
-                    subject={subject}
-                    index={idx}
-                    isOnly={subjects.length === 1}
-                    onUpdate={updateSubject}
-                    onRemove={removeSubject}
-                    onToggleMode={toggleMode}
-                  />
-                ))}
-              </AnimatePresence>
-            </div>
-
-            {/* Actions */}
-            <div className="mt-6 flex flex-col sm:flex-row gap-3">
-              <Button
-                data-ocid="cgpa.add_button"
-                type="button"
-                variant="outline"
-                onClick={addSubject}
-                className="flex-1 gap-2 h-11 font-semibold transition-all duration-200"
+          {/* ── Tab switcher ─────────────────────────────────────── */}
+          <div
+            className="flex mb-4 p-1 rounded-2xl gap-1"
+            style={{
+              background: "oklch(0.16 0.03 280 / 0.6)",
+              border: "1px solid oklch(0.30 0.05 280 / 0.4)",
+              backdropFilter: "blur(12px)",
+            }}
+          >
+            <button
+              data-ocid="cgpa.tab.manual"
+              type="button"
+              onClick={() => setActiveTab("manual")}
+              className="flex-1 flex items-center justify-center gap-2 py-2.5 px-4 rounded-xl text-sm font-semibold transition-all duration-200"
+              style={
+                activeTab === "manual"
+                  ? {
+                      background:
+                        "linear-gradient(135deg, oklch(0.78 0.18 195 / 0.25), oklch(0.60 0.22 240 / 0.2))",
+                      border: "1px solid oklch(0.82 0.18 195 / 0.4)",
+                      color: "oklch(0.92 0.12 195)",
+                      boxShadow: "0 2px 12px oklch(0.82 0.18 195 / 0.15)",
+                    }
+                  : {
+                      border: "1px solid transparent",
+                      color: "oklch(0.55 0.04 280)",
+                    }
+              }
+            >
+              <Calculator className="w-4 h-4" />
+              Manual Entry
+            </button>
+            <button
+              data-ocid="cgpa.tab.upload"
+              type="button"
+              onClick={() => setActiveTab("upload")}
+              className="flex-1 flex items-center justify-center gap-2 py-2.5 px-4 rounded-xl text-sm font-semibold transition-all duration-200"
+              style={
+                activeTab === "upload"
+                  ? {
+                      background:
+                        "linear-gradient(135deg, oklch(0.55 0.22 295 / 0.25), oklch(0.40 0.18 280 / 0.2))",
+                      border: "1px solid oklch(0.55 0.22 295 / 0.4)",
+                      color: "oklch(0.82 0.18 295)",
+                      boxShadow: "0 2px 12px oklch(0.55 0.22 295 / 0.15)",
+                    }
+                  : {
+                      border: "1px solid transparent",
+                      color: "oklch(0.55 0.04 280)",
+                    }
+              }
+            >
+              <Brain className="w-4 h-4" />
+              Upload Result
+              <span
+                className="text-[10px] font-bold px-1.5 py-0.5 rounded-full"
                 style={{
-                  background: "oklch(0.18 0.03 280 / 0.6)",
-                  border: "1px solid oklch(0.82 0.18 195 / 0.3)",
-                  color: "oklch(0.82 0.18 195)",
+                  background: "oklch(0.55 0.22 295 / 0.25)",
+                  border: "1px solid oklch(0.55 0.22 295 / 0.4)",
+                  color: "oklch(0.80 0.18 295)",
                 }}
               >
-                <Plus className="w-4 h-4" />
-                Add Subject
-              </Button>
-
-              <Button
-                data-ocid="cgpa.calculate_button"
-                type="button"
-                onClick={handleCalculate}
-                disabled={isLoading}
-                className="flex-1 h-11 font-bold text-base gap-2 transition-all duration-200"
-                style={{
-                  background: isLoading
-                    ? "oklch(0.55 0.10 195 / 0.5)"
-                    : "linear-gradient(135deg, oklch(0.78 0.18 195), oklch(0.60 0.22 240))",
-                  color: "oklch(0.08 0.02 280)",
-                  border: "none",
-                  boxShadow: isLoading
-                    ? "none"
-                    : "0 4px 20px oklch(0.82 0.18 195 / 0.35)",
-                }}
-              >
-                {isLoading ? (
-                  <>
-                    <Loader2
-                      data-ocid="cgpa.result.loading_state"
-                      className="w-4 h-4 animate-spin"
-                    />
-                    Calculating…
-                  </>
-                ) : (
-                  <>
-                    <Calculator className="w-4 h-4" />
-                    Calculate CGPA
-                  </>
-                )}
-              </Button>
-            </div>
+                AI
+              </span>
+            </button>
           </div>
 
-          {/* Result card */}
-          <AnimatePresence>
-            {result !== null && !isLoading && classification && (
+          <AnimatePresence mode="wait">
+            {activeTab === "manual" ? (
+              /* ── Manual Entry Tab ──────────────────────────────── */
               <motion.div
-                key="result"
-                data-ocid="cgpa.result_card"
-                initial={{ opacity: 0, scale: 0.88, y: 20 }}
-                animate={{ opacity: 1, scale: 1, y: 0 }}
-                exit={{ opacity: 0, scale: 0.92, y: -10 }}
-                transition={{ duration: 0.5, ease: [0.34, 1.56, 0.64, 1] }}
-                className="mt-6 rounded-2xl overflow-hidden"
-                style={{
-                  background:
-                    "linear-gradient(135deg, oklch(0.16 0.04 280 / 0.85), oklch(0.14 0.03 260 / 0.9))",
-                  border: "1px solid oklch(0.82 0.18 195 / 0.4)",
-                  boxShadow:
-                    "0 0 0 1px oklch(0.82 0.18 195 / 0.1) inset, 0 8px 40px oklch(0.82 0.18 195 / 0.15), 0 0 80px oklch(0.82 0.18 195 / 0.08)",
-                }}
+                key="manual"
+                initial={{ opacity: 0, x: -16 }}
+                animate={{ opacity: 1, x: 0 }}
+                exit={{ opacity: 0, x: -16 }}
+                transition={{ duration: 0.22, ease: "easeInOut" }}
               >
-                <div
-                  data-ocid="cgpa.result.success_state"
-                  className="p-8 text-center relative overflow-hidden"
-                >
-                  {/* Glow orb behind number */}
-                  <div
-                    aria-hidden
-                    className="absolute inset-0 flex items-center justify-center pointer-events-none"
-                  >
-                    <div
-                      className="w-48 h-48 rounded-full opacity-20"
-                      style={{
-                        background:
-                          "radial-gradient(circle, oklch(0.82 0.18 195 / 0.8) 0%, transparent 70%)",
-                        filter: "blur(30px)",
-                      }}
-                    />
+                {/* Main glass card */}
+                <div className="glass-card rounded-2xl p-6 md:p-8">
+                  {/* Table header */}
+                  <div className="grid grid-cols-[1fr_auto_auto_auto] gap-3 items-center mb-3 px-1">
+                    <div className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">
+                      Subject
+                    </div>
+                    <div className="text-xs font-semibold uppercase tracking-widest text-muted-foreground text-center w-20">
+                      Grade
+                    </div>
+                    <div className="text-xs font-semibold uppercase tracking-widest text-muted-foreground text-center w-20">
+                      Credits
+                    </div>
+                    <div className="w-8" />
                   </div>
 
-                  <div className="relative">
-                    <div className="flex items-center justify-center gap-2 mb-2">
-                      <Sparkles
-                        className="w-4 h-4"
-                        style={{ color: "oklch(0.82 0.18 195)" }}
-                      />
-                      <span className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">
-                        Your CGPA
-                      </span>
-                      <Sparkles
-                        className="w-4 h-4"
-                        style={{ color: "oklch(0.82 0.18 195)" }}
-                      />
-                    </div>
+                  {/* Subject rows */}
+                  <div className="space-y-3">
+                    <AnimatePresence initial={false}>
+                      {subjects.map((subject, idx) => (
+                        <SubjectRowItem
+                          key={subject.id}
+                          subject={subject}
+                          index={idx}
+                          isOnly={subjects.length === 1}
+                          onUpdate={updateSubject}
+                          onRemove={removeSubject}
+                          onToggleMode={toggleMode}
+                        />
+                      ))}
+                    </AnimatePresence>
+                  </div>
 
-                    <div
-                      className="font-display text-7xl md:text-8xl font-bold mb-3 leading-none"
+                  {/* Actions */}
+                  <div className="mt-6 flex flex-col sm:flex-row gap-3">
+                    <Button
+                      data-ocid="cgpa.add_button"
+                      type="button"
+                      variant="outline"
+                      onClick={addSubject}
+                      className="flex-1 gap-2 h-11 font-semibold transition-all duration-200"
                       style={{
-                        background:
-                          "linear-gradient(135deg, oklch(0.92 0.10 195), oklch(0.82 0.18 195), oklch(0.70 0.22 240))",
-                        WebkitBackgroundClip: "text",
-                        WebkitTextFillColor: "transparent",
-                        backgroundClip: "text",
-                        filter:
-                          "drop-shadow(0 0 20px oklch(0.82 0.18 195 / 0.4))",
+                        background: "oklch(0.18 0.03 280 / 0.6)",
+                        border: "1px solid oklch(0.82 0.18 195 / 0.3)",
+                        color: "oklch(0.82 0.18 195)",
                       }}
                     >
-                      {result.toFixed(2)}
-                    </div>
+                      <Plus className="w-4 h-4" />
+                      Add Subject
+                    </Button>
 
-                    <div className="flex items-center justify-center gap-2">
-                      <span className="text-lg mr-1">
-                        {classification.icon}
-                      </span>
-                      <Badge
-                        className="px-4 py-1 text-sm font-bold rounded-full"
-                        style={{
-                          background: "oklch(0.20 0.04 280 / 0.8)",
-                          border: "1px solid oklch(0.82 0.18 195 / 0.3)",
-                          color: "oklch(0.82 0.18 195)",
-                        }}
-                      >
-                        {classification.label}
-                      </Badge>
-                    </div>
-
-                    {/* Scale bar */}
-                    <div className="mt-6 max-w-xs mx-auto">
-                      <div className="flex justify-between text-xs text-muted-foreground mb-1.5">
-                        <span>0</span>
-                        <span>5</span>
-                        <span>10</span>
-                      </div>
-                      <div
-                        className="h-2 rounded-full relative overflow-hidden"
-                        style={{
-                          background: "oklch(0.20 0.03 280 / 0.8)",
-                          border: "1px solid oklch(0.30 0.05 280 / 0.5)",
-                        }}
-                      >
-                        <motion.div
-                          className="absolute left-0 top-0 h-full rounded-full"
-                          initial={{ width: "0%" }}
-                          animate={{ width: `${(result / 10) * 100}%` }}
-                          transition={{
-                            duration: 0.8,
-                            delay: 0.2,
-                            ease: "easeOut",
-                          }}
-                          style={{
-                            background:
-                              "linear-gradient(90deg, oklch(0.78 0.18 195), oklch(0.65 0.22 240))",
-                            boxShadow: "0 0 8px oklch(0.82 0.18 195 / 0.6)",
-                          }}
-                        />
-                      </div>
-                    </div>
+                    <Button
+                      data-ocid="cgpa.calculate_button"
+                      type="button"
+                      onClick={handleCalculate}
+                      disabled={isLoading}
+                      className="flex-1 h-11 font-bold text-base gap-2 transition-all duration-200"
+                      style={{
+                        background: isLoading
+                          ? "oklch(0.55 0.10 195 / 0.5)"
+                          : "linear-gradient(135deg, oklch(0.78 0.18 195), oklch(0.60 0.22 240))",
+                        color: "oklch(0.08 0.02 280)",
+                        border: "none",
+                        boxShadow: isLoading
+                          ? "none"
+                          : "0 4px 20px oklch(0.82 0.18 195 / 0.35)",
+                      }}
+                    >
+                      {isLoading ? (
+                        <>
+                          <Loader2
+                            data-ocid="cgpa.result.loading_state"
+                            className="w-4 h-4 animate-spin"
+                          />
+                          Calculating…
+                        </>
+                      ) : (
+                        <>
+                          <Calculator className="w-4 h-4" />
+                          Calculate CGPA
+                        </>
+                      )}
+                    </Button>
                   </div>
                 </div>
               </motion.div>
+            ) : (
+              /* ── Upload Result Tab ─────────────────────────────── */
+              <motion.div
+                key="upload"
+                initial={{ opacity: 0, x: 16 }}
+                animate={{ opacity: 1, x: 0 }}
+                exit={{ opacity: 0, x: 16 }}
+                transition={{ duration: 0.22, ease: "easeInOut" }}
+              >
+                <div className="glass-card rounded-2xl p-6 md:p-8 space-y-5">
+                  {/* Header */}
+                  <div>
+                    <h2
+                      className="font-display text-lg font-bold mb-1"
+                      style={{ color: "oklch(0.90 0.06 280)" }}
+                    >
+                      AI-Powered Result Analysis
+                    </h2>
+                    <p className="text-sm text-muted-foreground leading-relaxed">
+                      Upload a photo of your marksheet or result card. Our AI
+                      will extract all subjects and calculate your CGPA
+                      automatically.
+                    </p>
+                  </div>
+
+                  {/* Dropzone */}
+                  {!uploadedImage ? (
+                    <label
+                      data-ocid="cgpa.dropzone"
+                      htmlFor="result-image-input"
+                      onDragOver={(e) => {
+                        e.preventDefault();
+                        setIsDragging(true);
+                      }}
+                      onDragLeave={() => setIsDragging(false)}
+                      onDrop={handleDropzoneDrop}
+                      className="relative flex flex-col items-center justify-center gap-4 p-10 rounded-2xl cursor-pointer transition-all duration-200 select-none"
+                      style={{
+                        border: isDragging
+                          ? "2px dashed oklch(0.82 0.18 195 / 0.8)"
+                          : "2px dashed oklch(0.35 0.07 280 / 0.6)",
+                        background: isDragging
+                          ? "oklch(0.82 0.18 195 / 0.05)"
+                          : "oklch(0.15 0.025 280 / 0.5)",
+                        boxShadow: isDragging
+                          ? "0 0 0 1px oklch(0.82 0.18 195 / 0.15), 0 0 30px oklch(0.82 0.18 195 / 0.1)"
+                          : "none",
+                      }}
+                    >
+                      <div
+                        className="p-4 rounded-2xl transition-all duration-200"
+                        style={{
+                          background: isDragging
+                            ? "oklch(0.82 0.18 195 / 0.15)"
+                            : "oklch(0.20 0.04 280 / 0.8)",
+                          border: `1px solid oklch(0.82 0.18 195 / ${isDragging ? "0.5" : "0.2"})`,
+                          boxShadow: isDragging
+                            ? "0 0 20px oklch(0.82 0.18 195 / 0.3)"
+                            : "none",
+                        }}
+                      >
+                        <CloudUpload
+                          className="w-8 h-8 transition-colors duration-200"
+                          style={{
+                            color: isDragging
+                              ? "oklch(0.82 0.18 195)"
+                              : "oklch(0.65 0.10 195)",
+                          }}
+                        />
+                      </div>
+                      <div className="text-center">
+                        <p
+                          className="font-semibold text-sm mb-1"
+                          style={{
+                            color: isDragging
+                              ? "oklch(0.82 0.18 195)"
+                              : "oklch(0.80 0.05 280)",
+                          }}
+                        >
+                          {isDragging
+                            ? "Drop to upload"
+                            : "Drop your result image here or click to upload"}
+                        </p>
+                        <p className="text-xs text-muted-foreground">
+                          Supports JPG, PNG, WEBP, PDF · Max 10 MB
+                        </p>
+                      </div>
+                      <Button
+                        data-ocid="cgpa.upload_button"
+                        type="button"
+                        size="sm"
+                        onClick={(e) => e.preventDefault()}
+                        asChild={false}
+                        className="gap-2 font-semibold pointer-events-none"
+                        style={{
+                          background: "oklch(0.82 0.18 195 / 0.15)",
+                          border: "1px solid oklch(0.82 0.18 195 / 0.4)",
+                          color: "oklch(0.82 0.18 195)",
+                        }}
+                      >
+                        <CloudUpload className="w-3.5 h-3.5" />
+                        Choose File
+                      </Button>
+                      <input
+                        id="result-image-input"
+                        ref={fileInputRef}
+                        type="file"
+                        accept="image/jpeg,image/png,image/webp,application/pdf"
+                        onChange={handleFileInputChange}
+                        className="sr-only"
+                      />
+                    </label>
+                  ) : (
+                    /* ── Image preview ─────────────────────────── */
+                    <div
+                      className="relative rounded-2xl overflow-hidden"
+                      style={{
+                        border: "1px solid oklch(0.82 0.18 195 / 0.3)",
+                        background: "oklch(0.14 0.025 280)",
+                      }}
+                    >
+                      <div
+                        className="flex items-center gap-3 p-3 border-b"
+                        style={{ borderColor: "oklch(0.30 0.05 280 / 0.4)" }}
+                      >
+                        <div
+                          className="w-2 h-2 rounded-full"
+                          style={{ background: "oklch(0.82 0.18 195)" }}
+                        />
+                        <span className="text-sm font-medium text-muted-foreground truncate flex-1">
+                          {uploadedImage.name}
+                        </span>
+                        <span className="text-xs text-muted-foreground shrink-0">
+                          {(uploadedImage.size / 1024).toFixed(0)} KB
+                        </span>
+                        <button
+                          type="button"
+                          onClick={clearUpload}
+                          className="w-6 h-6 flex items-center justify-center rounded-full transition-colors duration-150 hover:bg-destructive/20"
+                          style={{ color: "oklch(0.63 0.22 25)" }}
+                          aria-label="Remove uploaded file"
+                        >
+                          <X className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                      {uploadedImage.type !== "application/pdf" &&
+                        imagePreviewUrl && (
+                          <img
+                            src={imagePreviewUrl}
+                            alt="Uploaded result preview"
+                            className="w-full max-h-64 object-contain p-2"
+                            style={{ background: "oklch(0.12 0.02 280)" }}
+                          />
+                        )}
+                      {uploadedImage.type === "application/pdf" && (
+                        <div className="flex flex-col items-center justify-center gap-2 py-8">
+                          <span className="text-4xl">📄</span>
+                          <p className="text-sm text-muted-foreground">
+                            PDF ready for analysis
+                          </p>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Loading state */}
+                  <AnimatePresence>
+                    {isAnalysing && (
+                      <motion.div
+                        data-ocid="cgpa.analyse.loading_state"
+                        key="analysing"
+                        initial={{ opacity: 0, y: 8 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={{ opacity: 0, y: -8 }}
+                        className="flex flex-col items-center gap-3 py-4 rounded-2xl"
+                        style={{
+                          background:
+                            "linear-gradient(135deg, oklch(0.55 0.22 295 / 0.08), oklch(0.40 0.15 280 / 0.06))",
+                          border: "1px solid oklch(0.55 0.22 295 / 0.2)",
+                        }}
+                      >
+                        <div className="relative">
+                          <Loader2
+                            className="w-8 h-8 animate-spin"
+                            style={{ color: "oklch(0.75 0.20 295)" }}
+                          />
+                          <Brain
+                            className="w-3.5 h-3.5 absolute -bottom-0.5 -right-0.5"
+                            style={{ color: "oklch(0.82 0.18 195)" }}
+                          />
+                        </div>
+                        <div className="text-center">
+                          <p
+                            className="font-semibold text-sm"
+                            style={{ color: "oklch(0.82 0.18 295)" }}
+                          >
+                            Analysing your result…
+                          </p>
+                          <p className="text-xs text-muted-foreground mt-1">
+                            AI is reading your marksheet and extracting subjects
+                          </p>
+                        </div>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+
+                  {/* Error state */}
+                  <AnimatePresence>
+                    {analyseError && !isAnalysing && (
+                      <motion.div
+                        data-ocid="cgpa.analyse.error_state"
+                        key="analyse-error"
+                        initial={{ opacity: 0, y: 8 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={{ opacity: 0, y: -8 }}
+                        className="rounded-2xl p-4"
+                        style={{
+                          background: "oklch(0.15 0.04 25 / 0.5)",
+                          border: "1px solid oklch(0.63 0.22 25 / 0.4)",
+                        }}
+                      >
+                        <p
+                          className="text-sm font-medium text-center"
+                          style={{ color: "oklch(0.80 0.18 25)" }}
+                        >
+                          {analyseError}
+                        </p>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+
+                  {/* Extracted subjects preview */}
+                  <AnimatePresence>
+                    {extractedSubjects &&
+                      extractedSubjects.length > 0 &&
+                      !isAnalysing && (
+                        <motion.div
+                          data-ocid="cgpa.analyse.success_state"
+                          key="extracted"
+                          initial={{ opacity: 0, y: 10 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          exit={{ opacity: 0, y: -10 }}
+                          transition={{ duration: 0.3 }}
+                          className="rounded-2xl overflow-hidden"
+                          style={{
+                            background: "oklch(0.15 0.025 280 / 0.7)",
+                            border: "1px solid oklch(0.82 0.18 195 / 0.25)",
+                          }}
+                        >
+                          <div
+                            className="flex items-center gap-2 px-4 py-3 border-b"
+                            style={{
+                              borderColor: "oklch(0.30 0.05 280 / 0.4)",
+                              background: "oklch(0.82 0.18 195 / 0.06)",
+                            }}
+                          >
+                            <Sparkles
+                              className="w-3.5 h-3.5"
+                              style={{ color: "oklch(0.82 0.18 195)" }}
+                            />
+                            <span
+                              className="text-xs font-bold uppercase tracking-widest"
+                              style={{ color: "oklch(0.82 0.18 195)" }}
+                            >
+                              {extractedSubjects.length} subjects detected
+                            </span>
+                          </div>
+                          <div
+                            className="divide-y"
+                            style={{
+                              borderColor: "oklch(0.25 0.04 280 / 0.4)",
+                            }}
+                          >
+                            {extractedSubjects.map((item, idx) => (
+                              <div
+                                key={`extracted-${
+                                  // biome-ignore lint/suspicious/noArrayIndexKey: static list from parse result
+                                  idx
+                                }`}
+                                className="flex items-center gap-3 px-4 py-2.5"
+                              >
+                                <span
+                                  className="font-display font-semibold text-xs w-5 shrink-0"
+                                  style={{ color: "oklch(0.60 0.10 195)" }}
+                                >
+                                  {String(idx + 1).padStart(2, "0")}
+                                </span>
+                                <span className="flex-1 text-sm text-foreground truncate">
+                                  {item.subject}
+                                </span>
+                                <div className="flex items-center gap-2 shrink-0">
+                                  <span
+                                    className="text-xs font-bold px-2 py-0.5 rounded-lg"
+                                    style={{
+                                      background: "oklch(0.82 0.18 195 / 0.12)",
+                                      border:
+                                        "1px solid oklch(0.82 0.18 195 / 0.25)",
+                                      color: "oklch(0.82 0.18 195)",
+                                    }}
+                                  >
+                                    {item.grade.toFixed(1)}
+                                  </span>
+                                  <span
+                                    className="text-xs text-muted-foreground"
+                                    title="Credits"
+                                  >
+                                    {item.credits} cr
+                                  </span>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </motion.div>
+                      )}
+                  </AnimatePresence>
+
+                  {/* Analyse button */}
+                  <Button
+                    data-ocid="cgpa.analyse_button"
+                    type="button"
+                    onClick={handleAnalyse}
+                    disabled={isAnalysing || !uploadedImage || actorFetching}
+                    className="w-full h-12 font-bold text-base gap-2 transition-all duration-200"
+                    style={{
+                      background:
+                        isAnalysing || !uploadedImage || actorFetching
+                          ? "oklch(0.35 0.08 280 / 0.5)"
+                          : "linear-gradient(135deg, oklch(0.65 0.22 295), oklch(0.55 0.22 295), oklch(0.45 0.20 280))",
+                      color:
+                        isAnalysing || !uploadedImage || actorFetching
+                          ? "oklch(0.50 0.04 280)"
+                          : "oklch(0.98 0.005 280)",
+                      border: "none",
+                      boxShadow:
+                        isAnalysing || !uploadedImage || actorFetching
+                          ? "none"
+                          : "0 4px 24px oklch(0.55 0.22 295 / 0.4)",
+                    }}
+                  >
+                    {isAnalysing ? (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        Analysing…
+                      </>
+                    ) : (
+                      <>
+                        <Brain className="w-4 h-4" />
+                        Analyse &amp; Calculate CGPA
+                      </>
+                    )}
+                  </Button>
+
+                  {!GEMINI_API_KEY && (
+                    <p
+                      className="text-xs text-center"
+                      style={{ color: "oklch(0.65 0.15 60)" }}
+                    >
+                      ⚠ AI analysis not configured — please use Manual Entry.
+                    </p>
+                  )}
+                </div>
+              </motion.div>
             )}
+          </AnimatePresence>
+
+          {/* Result card — shown for both tabs */}
+          <AnimatePresence>
+            {result !== null &&
+              !isLoading &&
+              !isAnalysing &&
+              classification && (
+                <motion.div
+                  key="result"
+                  data-ocid="cgpa.result_card"
+                  initial={{ opacity: 0, scale: 0.88, y: 20 }}
+                  animate={{ opacity: 1, scale: 1, y: 0 }}
+                  exit={{ opacity: 0, scale: 0.92, y: -10 }}
+                  transition={{ duration: 0.5, ease: [0.34, 1.56, 0.64, 1] }}
+                  className="mt-6 rounded-2xl overflow-hidden"
+                  style={{
+                    background:
+                      "linear-gradient(135deg, oklch(0.16 0.04 280 / 0.85), oklch(0.14 0.03 260 / 0.9))",
+                    border: "1px solid oklch(0.82 0.18 195 / 0.4)",
+                    boxShadow:
+                      "0 0 0 1px oklch(0.82 0.18 195 / 0.1) inset, 0 8px 40px oklch(0.82 0.18 195 / 0.15), 0 0 80px oklch(0.82 0.18 195 / 0.08)",
+                  }}
+                >
+                  <div
+                    data-ocid="cgpa.result.success_state"
+                    className="p-8 text-center relative overflow-hidden"
+                  >
+                    {/* Glow orb behind number */}
+                    <div
+                      aria-hidden
+                      className="absolute inset-0 flex items-center justify-center pointer-events-none"
+                    >
+                      <div
+                        className="w-48 h-48 rounded-full opacity-20"
+                        style={{
+                          background:
+                            "radial-gradient(circle, oklch(0.82 0.18 195 / 0.8) 0%, transparent 70%)",
+                          filter: "blur(30px)",
+                        }}
+                      />
+                    </div>
+
+                    <div className="relative">
+                      <div className="flex items-center justify-center gap-2 mb-2">
+                        <Sparkles
+                          className="w-4 h-4"
+                          style={{ color: "oklch(0.82 0.18 195)" }}
+                        />
+                        <span className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">
+                          {activeTab === "upload"
+                            ? "AI-Detected CGPA"
+                            : "Your CGPA"}
+                        </span>
+                        <Sparkles
+                          className="w-4 h-4"
+                          style={{ color: "oklch(0.82 0.18 195)" }}
+                        />
+                      </div>
+
+                      <div
+                        className="font-display text-7xl md:text-8xl font-bold mb-3 leading-none"
+                        style={{
+                          background:
+                            "linear-gradient(135deg, oklch(0.92 0.10 195), oklch(0.82 0.18 195), oklch(0.70 0.22 240))",
+                          WebkitBackgroundClip: "text",
+                          WebkitTextFillColor: "transparent",
+                          backgroundClip: "text",
+                          filter:
+                            "drop-shadow(0 0 20px oklch(0.82 0.18 195 / 0.4))",
+                        }}
+                      >
+                        {result.toFixed(2)}
+                      </div>
+
+                      <div className="flex items-center justify-center gap-2">
+                        <span className="text-lg mr-1">
+                          {classification.icon}
+                        </span>
+                        <Badge
+                          className="px-4 py-1 text-sm font-bold rounded-full"
+                          style={{
+                            background: "oklch(0.20 0.04 280 / 0.8)",
+                            border: "1px solid oklch(0.82 0.18 195 / 0.3)",
+                            color: "oklch(0.82 0.18 195)",
+                          }}
+                        >
+                          {classification.label}
+                        </Badge>
+                      </div>
+
+                      {/* Scale bar */}
+                      <div className="mt-6 max-w-xs mx-auto">
+                        <div className="flex justify-between text-xs text-muted-foreground mb-1.5">
+                          <span>0</span>
+                          <span>5</span>
+                          <span>10</span>
+                        </div>
+                        <div
+                          className="h-2 rounded-full relative overflow-hidden"
+                          style={{
+                            background: "oklch(0.20 0.03 280 / 0.8)",
+                            border: "1px solid oklch(0.30 0.05 280 / 0.5)",
+                          }}
+                        >
+                          <motion.div
+                            className="absolute left-0 top-0 h-full rounded-full"
+                            initial={{ width: "0%" }}
+                            animate={{ width: `${(result / 10) * 100}%` }}
+                            transition={{
+                              duration: 0.8,
+                              delay: 0.2,
+                              ease: "easeOut",
+                            }}
+                            style={{
+                              background:
+                                "linear-gradient(90deg, oklch(0.78 0.18 195), oklch(0.65 0.22 240))",
+                              boxShadow: "0 0 8px oklch(0.82 0.18 195 / 0.6)",
+                            }}
+                          />
+                        </div>
+                      </div>
+
+                      {activeTab === "upload" && extractedSubjects && (
+                        <p className="mt-4 text-xs text-muted-foreground">
+                          Calculated from {extractedSubjects.length} subjects
+                          detected in your result image
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                </motion.div>
+              )}
 
             {calcError && !isLoading && (
               <motion.div

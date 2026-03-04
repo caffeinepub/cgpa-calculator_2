@@ -1,35 +1,36 @@
-# CricOracle.AI — CGPA Calculator
+# CGPA Calculator — AI Image Analysis Upgrade
 
 ## Current State
-New project. No existing frontend or backend code.
+- Fully working CGPA Calculator with dark glassmorphism design
+- Manual subject entry: each row has grade (number or letter dropdown) + credit input
+- Backend: Motoko `calculate(grades)` and `gradeToPoint(letterGrade)` functions
+- Frontend: dynamic add/remove subject rows, validation, animated result card with classification badge
+- Credits accept decimals (0.5, 1.5) and zero-credit subjects
 
 ## Requested Changes (Diff)
 
 ### Add
-- Backend: `calculate` endpoint accepting an array of subjects (grade + credit), returning CGPA rounded to 2 decimal places
-- Backend: Grade-to-point conversion (O=10, A+=9, A=8, B+=7, B=6, C=5)
-- Frontend: Single-page CGPA Calculator app with dynamic subject rows
-- Frontend: Each row has a grade input (toggle between numeric 0–10 and letter-grade dropdown) and a credit number input
-- Frontend: Add Subject / Remove Subject row controls
-- Frontend: Calculate CGPA button that calls backend and displays result
-- Frontend: Input validation (no empty fields, valid ranges)
-- Frontend: Loading state during calculation
-- Frontend: Error state display
-- Frontend: Smooth animations for adding/removing rows and showing result
-- Frontend: Result displayed in a highlighted card
+- **Image upload flow**: Student can upload a photo of their result/marksheet instead of manually typing grades
+- **AI image analysis**: Backend sends the uploaded image to an external AI vision API (Google Gemini vision) via HTTP outcall, which extracts all subject grades and credits from the image
+- **"Analyse & Calculate" button**: One-click button that uploads the image, calls the AI analysis, fills in subjects, and calculates CGPA instantly
+- **Image preview**: Show a thumbnail of the uploaded image before analysis
+- **Extracted subjects preview**: After AI analysis, show the detected subjects/grades/credits in the existing table so the student can verify or edit before final calculation
+- **Tab/mode switcher**: Two modes — "Manual Entry" (existing) and "Upload Result" (new image flow)
+- **http-outcalls** Caffeine component for backend HTTP calls to AI vision API
 
 ### Modify
-N/A
+- Backend: add `analyseResultImage(imageBase64: Text, mimeType: Text)` function that calls Gemini vision API and returns extracted subjects as JSON text
+- Frontend App.tsx: add tab switcher between manual and image modes; add image upload section; wire AI analysis flow
 
 ### Remove
-N/A
+- Nothing removed; existing manual entry remains fully functional
 
 ## Implementation Plan
-1. Generate Motoko backend with `calculate` function accepting subjects array, returning Float CGPA
-2. Build React frontend:
-   - SubjectRow component with grade mode toggle (number input vs dropdown) and credit input
-   - Dynamic list of SubjectRow components (add/remove)
-   - Calculate button with loading state wired to backend
-   - Result display card with animation
-   - Full input validation and error messaging
-   - Mobile-responsive centered card layout with glassmorphism/dark theme
+1. Select `http-outcalls` component
+2. Generate new Motoko backend with `analyseResultImage` function using HTTP outcalls to Gemini API
+3. Frontend: add tab switcher UI (Manual Entry / Upload Result)
+4. Frontend: image upload dropzone with preview thumbnail
+5. Frontend: "Analyse & Calculate" button that calls backend, parses returned JSON, fills subject rows, and triggers CGPA calculation
+6. Frontend: loading state while AI is processing image
+7. Frontend: error handling if image cannot be parsed (e.g. blurry, unsupported format)
+8. Keep all existing manual entry functionality intact

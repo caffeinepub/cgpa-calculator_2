@@ -7,10 +7,15 @@ import { useMutation } from "@tanstack/react-query";
 import {
   Brain,
   Calculator,
+  CheckCircle2,
   ChevronDown,
   CloudUpload,
+  ExternalLink,
+  Eye,
+  EyeOff,
   GraduationCap,
   Hash,
+  Key,
   Loader2,
   Plus,
   Sparkles,
@@ -104,13 +109,19 @@ function newId() {
   return `row-${++rowCounter}`;
 }
 
-const GEMINI_API_KEY = import.meta.env.VITE_GEMINI_API_KEY ?? "";
-
 export default function App() {
   const { actor, isFetching: actorFetching } = useActor();
   const _formId = useId();
 
   const [activeTab, setActiveTab] = useState<AppTab>("manual");
+
+  // Gemini API key stored in localStorage
+  const [geminiApiKey, setGeminiApiKey] = useState<string>(
+    () => localStorage.getItem("gemini_api_key") ?? "",
+  );
+  const [apiKeyInput, setApiKeyInput] = useState<string>("");
+  const [showApiKeyValue, setShowApiKeyValue] = useState<boolean>(false);
+
   const [subjects, setSubjects] = useState<SubjectRow[]>(() => [
     makeRow(newId()),
     makeRow(newId()),
@@ -314,6 +325,25 @@ export default function App() {
     setResult(null);
   }
 
+  function saveApiKey() {
+    const trimmed = apiKeyInput.trim();
+    if (!trimmed) {
+      toast.error("Please enter a valid API key.");
+      return;
+    }
+    localStorage.setItem("gemini_api_key", trimmed);
+    setGeminiApiKey(trimmed);
+    setApiKeyInput("");
+    toast.success("Gemini API key saved. AI is ready!");
+  }
+
+  function clearApiKey() {
+    localStorage.removeItem("gemini_api_key");
+    setGeminiApiKey("");
+    setApiKeyInput("");
+    toast.success("API key removed.");
+  }
+
   function fileToBase64(file: File): Promise<string> {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
@@ -335,9 +365,9 @@ export default function App() {
       return;
     }
 
-    if (!GEMINI_API_KEY) {
+    if (!geminiApiKey) {
       setAnalyseError(
-        "AI analysis not configured — please use Manual Entry mode.",
+        "AI analysis not configured — please add your Gemini API key below.",
       );
       return;
     }
@@ -362,7 +392,7 @@ export default function App() {
       const prompt = `You are an academic result parser. Analyse this student result/marksheet image carefully. Extract ALL subjects with their grade points and credit hours. Return ONLY a valid JSON array with no markdown, no code block, no explanation. Each object must have exactly these fields: {"subject": string, "grade": number (0-10 numeric grade point; convert letter grades O=10, A+=9, A=8, B+=7, B=6, C=5, F=0), "credits": number}. If credits are not visible, use 3 as default.`;
 
       const response = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`,
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${geminiApiKey}`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -430,12 +460,11 @@ export default function App() {
       }));
       setSubjects(newRows);
 
-      // Calculate CGPA via backend
-      const grades: Grade[] = sanitised.map((item) => ({
-        grade: item.grade,
-        credits: item.credits,
-      }));
-      const totalCredits = grades.reduce((sum, g) => sum + g.credits, 0);
+      // Calculate CGPA locally (weighted average) — no backend call needed
+      const totalCredits = sanitised.reduce(
+        (sum, item) => sum + item.credits,
+        0,
+      );
       if (totalCredits === 0) {
         toast.error(
           "All detected subjects have 0 credits. Please check the image.",
@@ -443,7 +472,11 @@ export default function App() {
         return;
       }
 
-      const cgpa = await actor.calculate(grades);
+      const weightedSum = sanitised.reduce(
+        (sum, item) => sum + item.grade * item.credits,
+        0,
+      );
+      const cgpa = weightedSum / totalCredits;
       setResult(cgpa);
       toast.success("CGPA calculated from your result image!");
     } catch (err) {
@@ -1055,13 +1088,179 @@ export default function App() {
                     )}
                   </Button>
 
-                  {!GEMINI_API_KEY && (
-                    <p
-                      className="text-xs text-center"
-                      style={{ color: "oklch(0.65 0.15 60)" }}
+                  {/* ── API Key Management ────────────────────────── */}
+                  {geminiApiKey ? (
+                    /* AI Ready state */
+                    <div
+                      className="flex items-center justify-between gap-3 px-4 py-3 rounded-2xl"
+                      style={{
+                        background:
+                          "linear-gradient(135deg, oklch(0.82 0.18 195 / 0.08), oklch(0.75 0.20 160 / 0.06))",
+                        border: "1px solid oklch(0.82 0.18 195 / 0.3)",
+                      }}
                     >
-                      ⚠ AI analysis not configured — please use Manual Entry.
-                    </p>
+                      <div className="flex items-center gap-2">
+                        <CheckCircle2
+                          className="w-4 h-4 shrink-0"
+                          style={{ color: "oklch(0.80 0.20 160)" }}
+                        />
+                        <span
+                          className="text-sm font-semibold"
+                          style={{ color: "oklch(0.85 0.12 160)" }}
+                        >
+                          AI Ready
+                        </span>
+                        <span
+                          className="text-xs px-2 py-0.5 rounded-full font-medium"
+                          style={{
+                            background: "oklch(0.82 0.18 195 / 0.12)",
+                            border: "1px solid oklch(0.82 0.18 195 / 0.25)",
+                            color: "oklch(0.75 0.15 195)",
+                          }}
+                        >
+                          Gemini configured
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={clearApiKey}
+                        className="text-xs font-medium transition-colors duration-150"
+                        style={{ color: "oklch(0.60 0.10 25)" }}
+                        onMouseEnter={(e) => {
+                          (e.currentTarget as HTMLButtonElement).style.color =
+                            "oklch(0.73 0.20 25)";
+                        }}
+                        onMouseLeave={(e) => {
+                          (e.currentTarget as HTMLButtonElement).style.color =
+                            "oklch(0.60 0.10 25)";
+                        }}
+                      >
+                        Change key
+                      </button>
+                    </div>
+                  ) : (
+                    /* API Key Entry UI */
+                    <AnimatePresence mode="wait">
+                      <motion.div
+                        key="api-key-ui"
+                        initial={{ opacity: 0, y: 8 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={{ opacity: 0, y: -8 }}
+                        transition={{ duration: 0.25 }}
+                        className="rounded-2xl overflow-hidden"
+                        style={{
+                          background:
+                            "linear-gradient(135deg, oklch(0.16 0.04 280 / 0.7), oklch(0.14 0.03 260 / 0.6))",
+                          border: "1px solid oklch(0.55 0.22 295 / 0.3)",
+                        }}
+                      >
+                        {/* Header */}
+                        <div
+                          className="flex items-center gap-2.5 px-4 py-3 border-b"
+                          style={{
+                            borderColor: "oklch(0.30 0.05 280 / 0.4)",
+                            background: "oklch(0.55 0.22 295 / 0.08)",
+                          }}
+                        >
+                          <Key
+                            className="w-3.5 h-3.5 shrink-0"
+                            style={{ color: "oklch(0.75 0.20 295)" }}
+                          />
+                          <span
+                            className="text-xs font-bold uppercase tracking-widest"
+                            style={{ color: "oklch(0.80 0.18 295)" }}
+                          >
+                            Configure AI Analysis
+                          </span>
+                        </div>
+
+                        {/* Body */}
+                        <div className="px-4 py-4 space-y-3">
+                          <p className="text-xs text-muted-foreground leading-relaxed">
+                            AI analysis requires a free Gemini API key from
+                            Google AI Studio. Your key is stored locally in your
+                            browser only.
+                          </p>
+
+                          {/* Input row */}
+                          <div className="relative">
+                            <Input
+                              data-ocid="cgpa.api_key.input"
+                              type={showApiKeyValue ? "text" : "password"}
+                              placeholder="Paste your Gemini API key here…"
+                              value={apiKeyInput}
+                              onChange={(e) => setApiKeyInput(e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter") saveApiKey();
+                              }}
+                              className="pr-10 h-10 text-sm input-glass rounded-xl font-mono"
+                              style={{
+                                background: "oklch(0.13 0.025 280 / 0.8)",
+                                border: "1px solid oklch(0.55 0.22 295 / 0.35)",
+                                color: "oklch(0.92 0.04 280)",
+                              }}
+                            />
+                            <button
+                              type="button"
+                              onClick={() => setShowApiKeyValue((v) => !v)}
+                              aria-label={
+                                showApiKeyValue ? "Hide key" : "Show key"
+                              }
+                              className="absolute right-3 top-1/2 -translate-y-1/2 transition-opacity hover:opacity-80"
+                              style={{ color: "oklch(0.55 0.08 280)" }}
+                            >
+                              {showApiKeyValue ? (
+                                <EyeOff className="w-4 h-4" />
+                              ) : (
+                                <Eye className="w-4 h-4" />
+                              )}
+                            </button>
+                          </div>
+
+                          {/* Actions */}
+                          <div className="flex items-center gap-2">
+                            <Button
+                              data-ocid="cgpa.api_key.submit_button"
+                              type="button"
+                              onClick={saveApiKey}
+                              disabled={!apiKeyInput.trim()}
+                              className="flex-1 h-9 font-semibold text-sm gap-2 transition-all duration-200"
+                              style={{
+                                background: apiKeyInput.trim()
+                                  ? "linear-gradient(135deg, oklch(0.65 0.22 295), oklch(0.50 0.20 280))"
+                                  : "oklch(0.25 0.05 280 / 0.6)",
+                                color: apiKeyInput.trim()
+                                  ? "oklch(0.98 0.005 280)"
+                                  : "oklch(0.45 0.05 280)",
+                                border: "none",
+                                boxShadow: apiKeyInput.trim()
+                                  ? "0 2px 16px oklch(0.55 0.22 295 / 0.35)"
+                                  : "none",
+                              }}
+                            >
+                              <Key className="w-3.5 h-3.5" />
+                              Save &amp; Enable AI
+                            </Button>
+
+                            <a
+                              data-ocid="cgpa.api_key.link"
+                              href="https://aistudio.google.com/app/apikey"
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="flex items-center gap-1 px-3 h-9 rounded-lg text-xs font-medium transition-colors duration-150 whitespace-nowrap"
+                              style={{
+                                background: "oklch(0.18 0.04 280 / 0.6)",
+                                border: "1px solid oklch(0.40 0.08 280 / 0.4)",
+                                color: "oklch(0.70 0.10 280)",
+                              }}
+                            >
+                              <ExternalLink className="w-3 h-3" />
+                              Get free key
+                            </a>
+                          </div>
+                        </div>
+                      </motion.div>
+                    </AnimatePresence>
                   )}
                 </div>
               </motion.div>
@@ -1266,7 +1465,19 @@ export default function App() {
       </main>
 
       {/* ── Footer ───────────────────────────────────────────────── */}
-      <footer className="relative z-10 text-center py-6 px-4">
+      <footer className="relative z-10 text-center py-6 px-4 space-y-1.5">
+        <p
+          className="text-xs font-semibold"
+          style={{
+            background:
+              "linear-gradient(90deg, oklch(0.82 0.18 195), oklch(0.75 0.20 295), oklch(0.82 0.18 60))",
+            WebkitBackgroundClip: "text",
+            WebkitTextFillColor: "transparent",
+            backgroundClip: "text",
+          }}
+        >
+          Made with love by Amer &amp; caffeine.AI
+        </p>
         <p className="text-xs text-muted-foreground">
           © {new Date().getFullYear()}.{" "}
           <a
